@@ -5,21 +5,22 @@ and consumed from Nix expressions, without a private Nix fork. Not part of Nix o
 nixray. The goal is genuine overlapping operations, not synchronous calls renamed
 to async.
 
-## Status: Phase 0
+## Status: Phase 1
 
 Implemented and tested against **Nix 2.34.9 on x86_64-linux**:
 
 - A native plugin loaded through `plugin-files` into unmodified Nix.
 - One real namespace, `builtins.async`, containing a synchronous integer identity
   probe: `builtins.async.probe 42` returns `42`.
-- CMake/CTest integration tests, including errors, laziness, integer boundaries,
-  reuse under GC pressure, and ELF plugin contract checks.
+- A standalone C++ runtime: tasks, shared futures, move-only promises, a fixed-size
+  thread-pool executor, a scheduler and non-waiting `when_all` composition.
+- CMake/CTest runtime and plugin tests, including deterministic concurrency,
+  shutdown races, errors, lifetimes and GC-pressure reuse of the plugin probe.
 - A pinned Nix flake for building, testing and development.
 
-**No tasks, futures, promises, executor, scheduler, timers, cancellation or async
-I/O are implemented yet.** `spawn`, `await`, `all`, `race`, `sleep` and `cancel`
-are proposed functionality, not available APIs. There is no concurrency or
-performance claim in this milestone.
+**The runtime is not connected to the Nix plugin yet.** Only `probe` is exposed
+to Nix. Nix `spawn`, `await`, `all`, `race`, `sleep` and `cancel` remain proposed
+APIs. There are no timers, cancellation, networking or event-loop backends.
 
 ## Architecture and feasibility
 
@@ -34,9 +35,42 @@ calling evaluator while native operations continue independently. Arbitrary Nix
 closures cannot simply be evaluated on worker threads in the same `EvalState`.
 New syntax and evaluator suspension/resumption are outside this plugin's scope.
 
+The native library does not include or link Nix. `Scheduler` registers a task's
+transition to Pending and dispatches it to `Executor`; workers transition tasks
+through Running to Completed/Failed. Task handles retain lifecycle information
+without an unbounded scheduler registry. `Executor::spawn` is a convenience over
+the same scheduler. Standard promises/shared futures handle results and errors;
+completion observers implement composition without a waiting thread.
+
+See [Phase 1 ownership and concurrency semantics](docs/phase-1.md).
+
 See the [Phase 0 architecture report](docs/phase-0.md) for matching upstream
 source references, C API findings, GC/ownership constraints and the precise
 native-operation/evaluator distinction.
+
+## Native runtime example
+
+```cpp
+#include "nix_async/executor.hh"
+#include "nix_async/when_all.hh"
+
+nix_async::Executor executor(2);
+auto a = executor.spawn([] { return 21; });
+auto b = executor.spawn([] { return 21; });
+auto combined = nix_async::when_all(a, b);
+const auto & results = combined.get(); // ordered vector<int>: [21, 21]
+```
+
+Submission alone does not prove overlap. The runnable
+[`examples/runtime.cc`](examples/runtime.cc) holds both tasks at a gate and only
+releases them after both have started. Build it as `build/nix_async_example`.
+
+`Future<T>` is copyable and multi-consumer: `get()` returns `const T &`, valid
+while a result-owning future remains alive (`void` for `Future<void>`). Move-only
+results can be inspected, not extracted. `Promise<T>` is move-only; abandoning it
+notifies consumers with `broken_promise`. `when_all` takes homogeneous futures,
+copies results in input order, waits for **all** completions even on failure, and
+reports the first input-order error. Non-void composition requires copyable values.
 
 ## Build and use
 
@@ -79,25 +113,39 @@ nix --option plugin-files "$PWD/build/libnix_async.so" \
 nix flake check
 ```
 
+Runtime-only builds need neither Nix development headers nor Boost:
+
+```sh
+cmake -S . -B build-runtime -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DNIX_ASYNC_BUILD_PLUGIN=OFF
+cmake --build build-runtime
+ctest --test-dir build-runtime --output-on-failure
+./build-runtime/nix_async_example
+```
+
+Use the `nix_async_runtime` CMake target when embedding via `add_subdirectory`.
+Installation includes `libnix_async_runtime.a` and `include/nix_async/`.
+
 Outside the flake, supply Nix **2.34.9** development headers and their transitive
 dependencies through `pkg-config` (`nix-expr`), compatible Boost headers, GCC or
 Clang with C++23 support, CMake >= 3.24, a build tool, and `readelf`. Set
 `-DNIX_EXECUTABLE=/path/to/matching/nix` if needed. CMake deliberately queries only
 Nix compilation flags; a plugin must resolve Nix symbols from its host.
 
-Plugin-only UndefinedBehaviorSanitizer run:
+Runtime and plugin UndefinedBehaviorSanitizer run (inside `nix develop`):
 
 ```sh
 cmake -S . -B build-ubsan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_CXX_FLAGS='-fsanitize=undefined -fno-sanitize-recover=all' \
-  -DCMAKE_MODULE_LINKER_FLAGS='-fsanitize=undefined'
+  -DCMAKE_MODULE_LINKER_FLAGS='-fsanitize=undefined' \
+  -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=undefined'
 cmake --build build-ubsan
 ctest --test-dir build-ubsan --output-on-failure
 ```
 
-This instruments the plugin, **not the host Nix or Boehm GC**. It is not a
-whole-evaluator memory-safety check. ASan/TSan are not validated for this milestone;
-there is no concurrent runtime to test yet.
+This instruments native runtime code and the plugin, **not the host Nix or Boehm
+GC**. It is not a whole-evaluator memory-safety check. See the Phase 1 report for
+standalone ASan/TSan commands and the observed GCC TSan exception-retry limitation.
 
 ## Limitations
 
@@ -105,6 +153,10 @@ there is no concurrent runtime to test yet.
 - `probe` is a temporary feasibility tool, not the future task API.
 - No automatic plugin installation, evaluator patch, parser extension or fork.
 - GC stress tests exercise Nix-owned values, not future native task finalization.
+- Native tasks are non-cancellable; shutdown drains accepted work and can wait
+  indefinitely for a non-returning task. The queue is currently unbounded.
+- Do not block pool workers waiting for work queued to that same saturated pool.
+  `when_all` does not introduce such waits, but arbitrary user callables can.
 - Pure evaluation works for this deterministic probe. Future I/O must explicitly
   address impurity, restricted evaluation and Nix string/store-path contexts;
   loading a plugin does not enforce those policies automatically.

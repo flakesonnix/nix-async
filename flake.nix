@@ -1,5 +1,5 @@
 {
-  description = "nix-async: plugin-only asynchronous native operations for Nix (Phase 0 probe)";
+  description = "nix-async: independent native async runtime and experimental Nix plugin";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/02c087f3fe673c9e317f206a627cb6b910336dbe";
 
@@ -16,6 +16,7 @@
           fileset = pkgs.lib.fileset.unions [
             ./CMakeLists.txt
             ./LICENSE
+            ./include
             ./src
             ./tests
             ./examples
@@ -31,15 +32,21 @@
           runHook postCheck
         '';
         meta = {
-          description = "Experimental native Nix plugin; Phase 0 loading probe";
+          description = "Native async runtime and experimental Nix plugin loading probe";
           license = pkgs.lib.licenses.mit;
           platforms = [ system ];
         };
       };
+      runtime = plugin.overrideAttrs {
+        pname = "nix-async-runtime";
+        nativeBuildInputs = [ pkgs.cmake pkgs.ninja ];
+        buildInputs = [ ];
+        cmakeFlags = [ "-DNIX_ASYNC_BUILD_PLUGIN=OFF" ];
+      };
     in
     {
       packages.${system}.default = plugin;
-      checks.${system}.plugin = plugin;
+      checks.${system} = { inherit plugin runtime; };
       devShells.${system}.default = pkgs.mkShell {
         inputsFrom = [ plugin ];
       };
