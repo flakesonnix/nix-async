@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime-debug:
+    name: runtime (Debug)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DNIX_ASYNC_BUILD_PLUGIN=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  runtime-ubsan:
+    name: runtime (UBSan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      # Matches the sanitizer recipe in README.md. The sanitizer flags must
+      # reach both consumption and compilation; CMake handles the runtime linkage.
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DNIX_ASYNC_BUILD_PLUGIN=OFF
+          -DCMAKE_CXX_FLAGS='-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
+          -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=undefined'
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  runtime-tsan:
+    name: runtime (TSan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      # Manual build to keep the sanitizer image lean; see docs/phase-1.md for
+      # the GCC libtsan exception-retry limitation and its pinned exclusion list.
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DNIX_ASYNC_BUILD_PLUGIN=OFF
+          -DCMAKE_CXX_FLAGS='-fsanitize=thread -fno-omit-frame-pointer -g'
+          -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=thread'
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run:
+          ctest --test-dir build --output-on-failure
+          -E '^runtime\.(future\.construction_failure|scheduler\.result_failure)$'
+
+  nix-flake-check:
+    name: nix flake check (plugin + runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          github-token: ${{ github.token }}
+      - name: nix flake check
+        run: nix flake check -L

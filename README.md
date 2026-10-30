@@ -1,5 +1,7 @@
 # nix-async
 
+[![CI](https://github.com/flakesonnix/nix-async/actions/workflows/ci.yml/badge.svg)](https://github.com/flakesonnix/nix-async/actions/workflows/ci.yml)
+
 An independent C++ project exploring asynchronous **native operations** initiated
 and consumed from Nix expressions, without a private Nix fork. Not part of Nix or
 nixray. The goal is genuine overlapping operations, not synchronous calls renamed
